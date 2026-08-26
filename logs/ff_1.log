@@ -1,0 +1,5 @@
+START 2026-07-17 19:15:10 Asia/Jakarta
+ffmpeg -hide_banner -loglevel warning -rtsp_transport tcp -rw_timeout 15000000 -fflags nobuffer -flags low_delay -i rtsp://127.0.0.1:65530/test.sdp -c:v libx264 -preset ultrafast -tune zerolatency -profile:v baseline -level 3.0 -pix_fmt yuv420p -s 960x540 -r 15 -b:v 800k -maxrate 800k -bufsize 1600k -g 30 -an -f hls -hls_time 2 -hls_list_size 6 -hls_flags delete_segments+append_list -hls_segment_filename /home/user/public/streams/1/seg_%03d.ts /home/user/public/streams/1/index.m3u8
+
+
+SPAWN ERROR: spawn ffmpeg ENOENT

@@ -184,3 +184,224 @@ body.light-mode .bg-slate-950\/40 {
     padding-top: 1rem !important; /* Mobile top bar is already present, so no extra padding needed on mobile! */
   }
 }
+
+/* ================= FULLSCREEN LIVE PLAYER ================= */
+/* Fallback CSS fullscreen (bila Fullscreen API tidak tersedia di WebView lama) */
+#player-video-stage.cctv-pseudo-fullscreen {
+  position: fixed !important;
+  inset: 0 !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  max-width: 100vw !important;
+  max-height: 100vh !important;
+  z-index: 9999 !important;
+  background: #000 !important;
+  border-radius: 0 !important;
+  grid-column: 1 / -1 !important;
+  padding: 0 !important;
+  margin: 0 !important;
+}
+
+#player-video-stage.cctv-pseudo-fullscreen video,
+#player-video-stage.cctv-pseudo-fullscreen iframe {
+  object-fit: contain !important;
+}
+
+/* Saat fullscreen penuh, video harus menutupi seluruh area */
+#player-video-stage:fullscreen {
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #000;
+}
+
+#player-video-stage:fullscreen video,
+#player-video-stage:fullscreen iframe {
+  width: 100% !important;
+  height: 100% !important;
+  object-fit: contain !important;
+}
+
+#player-video-stage:fullscreen #player-splash {
+  position: absolute !important;
+  inset: 0 !important;
+}
+
+/* ================= ANDROID-STYLE MOBILE BOTTOM NAV =================
+   Navigasi utama dibuat seperti aplikasi Android: fixed di bawah, mudah
+   disentuh, aman dari gesture bar, dan tidak menutupi isi halaman. */
+.mobile-bottom-nav {
+  display: none;
+}
+
+@media (max-width: 767px) {
+  #mobile-bottom-nav {
+    display: flex !important;
+    position: fixed;
+    z-index: 80;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    min-height: 64px;
+    padding: 7px 8px calc(7px + env(safe-area-inset-bottom, 0px));
+    align-items: stretch;
+    justify-content: space-around;
+    gap: 3px;
+    background: rgba(15, 23, 42, 0.96);
+    border-top: 1px solid rgba(71, 85, 105, 0.42);
+    box-shadow: 0 -10px 28px rgba(2, 6, 23, 0.5);
+    -webkit-backdrop-filter: blur(18px);
+    backdrop-filter: blur(18px);
+  }
+
+  /* Tailwind .hidden tetap harus menang untuk menu admin/privat */
+  #mobile-bottom-nav .mobile-bottom-item.hidden {
+    display: none !important;
+  }
+
+  #mobile-bottom-nav .mobile-bottom-item {
+    display: flex;
+    flex: 1 1 0%;
+    min-width: 0;
+    min-height: 50px;
+    padding: 2px 3px 1px;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    color: #94a3b8;
+    background: transparent;
+    border: 0;
+    border-radius: 14px;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+    transition: color 160ms ease, background-color 160ms ease, transform 160ms ease;
+  }
+
+  #mobile-bottom-nav .mobile-bottom-item:active {
+    transform: scale(0.94);
+    background: rgba(30, 41, 59, 0.82);
+  }
+
+  #mobile-bottom-nav .mobile-bottom-icon {
+    display: flex;
+    width: 34px;
+    height: 25px;
+    align-items: center;
+    justify-content: center;
+    border-radius: 999px;
+    font-size: 17px;
+    line-height: 1;
+    transition: background-color 160ms ease, color 160ms ease, transform 160ms ease;
+  }
+
+  #mobile-bottom-nav .mobile-bottom-label {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 10px;
+    line-height: 14px;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+  }
+
+  #mobile-bottom-nav .mobile-bottom-item.active {
+    color: #60a5fa;
+  }
+
+  #mobile-bottom-nav .mobile-bottom-item.active .mobile-bottom-icon {
+    color: #ffffff;
+    background: #2563eb;
+    box-shadow: 0 4px 12px rgba(37, 99, 235, 0.38);
+    transform: translateY(-1px);
+  }
+
+  #mobile-bottom-nav .mobile-bottom-item.active .mobile-bottom-label {
+    color: #93c5fd;
+  }
+
+  /* Halaman admin/settings dianggap berada di dalam menu Lainnya. */
+  #mobile-bottom-nav #mobile-bottom-more.active .mobile-bottom-icon {
+    color: #ffffff;
+    background: #334155;
+    box-shadow: 0 4px 12px rgba(51, 65, 85, 0.4);
+  }
+
+  /* Beri ruang aman agar kartu/tabel terakhir tidak tertutup bottom nav. */
+  #view-container {
+    padding-bottom: calc(5.25rem + env(safe-area-inset-bottom, 0px)) !important;
+    scroll-padding-bottom: calc(5.25rem + env(safe-area-inset-bottom, 0px));
+  }
+
+  /* Footer desktop digantikan oleh bottom navigation pada layar kecil. */
+  #app-container > main > footer {
+    display: none !important;
+  }
+
+  /* Drawer harus berada di atas bottom navigation ketika Menu dibuka. */
+  #sidebar {
+    z-index: 100 !important;
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+
+  #sidebar-backdrop {
+    z-index: 90 !important;
+  }
+
+  /* Toast tidak boleh tertutup oleh navigasi bawah. */
+  #toast {
+    bottom: calc(4.8rem + env(safe-area-inset-bottom, 0px)) !important;
+    left: 0.75rem;
+    right: 0.75rem;
+    max-width: none;
+  }
+
+  /* Area header lebih ringkas dan terasa seperti app bar Android. */
+  #app-container > header {
+    min-height: 56px;
+    height: 56px;
+  }
+}
+
+@media (max-width: 380px) {
+  #mobile-bottom-nav {
+    padding-left: 4px;
+    padding-right: 4px;
+    gap: 1px;
+  }
+
+  #mobile-bottom-nav .mobile-bottom-label {
+    font-size: 9px;
+  }
+}
+
+/* Bottom navigation pada tema terang */
+body.light-mode #mobile-bottom-nav {
+  background: rgba(255, 255, 255, 0.96);
+  border-top-color: rgba(203, 213, 225, 0.9);
+  box-shadow: 0 -10px 28px rgba(15, 23, 42, 0.12);
+}
+
+body.light-mode #mobile-bottom-nav .mobile-bottom-item {
+  color: #64748b;
+}
+
+body.light-mode #mobile-bottom-nav .mobile-bottom-item:active {
+  background: #f1f5f9;
+}
+
+body.light-mode #mobile-bottom-nav .mobile-bottom-item.active {
+  color: #2563eb;
+}
+
+body.light-mode #mobile-bottom-nav .mobile-bottom-item.active .mobile-bottom-label {
+  color: #2563eb;
+}
+
+body.light-mode #mobile-bottom-nav #mobile-bottom-more.active .mobile-bottom-icon {
+  color: #ffffff;
+  background: #475569;
+}

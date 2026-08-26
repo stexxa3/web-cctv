@@ -241,7 +241,18 @@ function getSystemTimeStatus() {
 
 app.use(cors({origin:true, credentials:true}));
 app.use(express.json({ limit: '2mb' }));
-app.use(express.static(path.join(__dirname, 'public')));
+// Static assets: JANGAN pernah simpan HTML/CSS/JS di cache browser agar update
+// tampilan (terutama saat ganti layout mobile) langsung terlihat tanpa hard-reload.
+const STATIC_DIR = path.join(__dirname, 'public');
+app.use(express.static(STATIC_DIR, {
+  setHeaders: (res, filePath) => {
+    if (filePath.endsWith('.html') || filePath.endsWith('.css') || filePath.endsWith('.js')) {
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+    }
+  }
+}));
 
 const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
@@ -599,45 +610,31 @@ try {
 console.log('FFmpeg AAC encoder:', HAVE_AAC ? 'yes':'no');
 
 function ffmpegLiveArgs(input, outDir, camCodec = 'auto'){
-  const enableAudio = (process.env.VIDEO_AUDIO === '1') && HAVE_AAC;
-  const isH264 = camCodec === 'h264' || input.includes('h264') || input.includes('H264');
-  const args = [];
+  const normalizedCodec = String(camCodec || '').toLowerCase();
+  const isH264 = normalizedCodec === 'h264' || /h264/i.test(input);
+  const isRtsp = /^rtsps?:\/\//i.test(input);
+  // Argumen paling kompatibel untuk FFmpeg Armbian lama (3.x/4.x).
+  // Hindari flag HLS canggih yang sering tidak didukung.
+  const args = ['-hide_banner', '-loglevel', 'error'];
 
-  // OPSI INPUT FFMPEG (Wajib diletakkan SEBELUM -i agar sintaks valid & tidak crash)
-  if (input.startsWith('rtsp:')) {
-    args.push('-rtsp_transport', 'tcp'); // Mengunci TCP untuk koneksi stabil pada port 5050 & 554
-  }
-  args.push('-fflags', 'nobuffer');
-  args.push('-flags', 'low_delay');
-
-  // INPUT STREAM URL
+  if (isRtsp) args.push('-rtsp_transport', 'tcp');
   args.push('-i', input);
 
-  // OPSI OUTPUT FFMPEG (Diletakkan SETELAH -i)
   if (isH264) {
-    // Jika kamera terdeteksi sudah H.264, COPY STREAM SAJA! Ini 0% CPU, sangat ringan & dingin di STB!
     args.push('-c:v', 'copy');
   } else {
-    // Jika HEVC/H.265 atau kustom, transcode ke H.264 Baseline
+    // Transcode ringan ke H.264 — hanya pakai flag yang paling umum
     args.push(
-      '-c:v','libx264','-preset','ultrafast','-tune','zerolatency',
-      '-profile:v','baseline','-level','3.0',
-      '-pix_fmt','yuv420p',
-      '-s', process.env.VIDEO_SIZE || '960x540',
-      '-r', process.env.VIDEO_FPS || '15',
-      '-b:v', process.env.VIDEO_BITRATE || '800k',
-      '-maxrate','800k','-bufsize','1600k',
-      '-g','30'
+      '-c:v','libx264',
+      '-preset','ultrafast',
+      '-tune','zerolatency',
+      '-vf','scale=960:540',
+      '-r','15',
+      '-an'
     );
   }
 
-  if(enableAudio){ args.push('-c:a','aac','-b:a','64k','-ac','1','-ar','44100'); } else { args.push('-an'); }
-  args.push(
-    '-f','hls','-hls_time','2','-hls_list_size','6',
-    '-hls_flags','delete_segments+append_list',
-    '-hls_segment_filename', path.join(outDir,'seg_%03d.ts'),
-    path.join(outDir,'index.m3u8')
-  );
+  args.push('-an', '-y', '-f','hls','-hls_time','2','-hls_list_size','6', path.join(outDir,'index.m3u8'));
   return args;
 }
 
@@ -650,13 +647,101 @@ function startStream(cameraId, rtspUrl, camCodec = 'auto'){
   const logFile = path.join(LOG_DIR, `ff_${id}.log`);
   const logStream = fs.createWriteStream(logFile, {flags:'w'});
   const args = ffmpegLiveArgs(rtspUrl, outDir, camCodec);
-  logStream.write(`ffmpeg ${args.join(' ')}\n\n`);
+  logStream.write(`START ${localNowSql()} ${APP_TIMEZONE}\nffmpeg ${args.join(' ')}\n\n`);
   console.log(`▶ stream ${id}: ${rtspUrl}`);
   const ff = spawn('ffmpeg', args);
   let lastErr = '';
-  ff.stderr.on('data', d=>{ const s = d.toString(); logStream.write(s); lastErr = s.slice(-300); });
-  ff.on('close', code=>{ logStream.end(`\nexit ${code}\n`); activeStreams.delete(id); console.log(`⏹ stream ${id} exit ${code}`); });
+  let logEnded = false;
+  const safeLogEnd = (tail='') => {
+    if (logEnded) return;
+    logEnded = true;
+    try { logStream.end(tail); } catch {}
+  };
+  ff.stderr.on('data', d=>{
+    if (logEnded) return;
+    const s = d.toString();
+    try { logStream.write(s); } catch {}
+    lastErr = s.slice(-400);
+  });
+  ff.on('error', err=>{
+    lastErr = `SPAWN ERROR: ${err.message}`;
+    safeLogEnd(`\n${lastErr}\n`);
+    console.error(`❌ FFmpeg stream ${id} spawn error:`, err.message);
+    activeStreams.delete(id);
+    clearTimeout(safetyTimer);
+  });
+  ff.on('close', code=>{
+    safeLogEnd(`\nexit ${code}\n`);
+    activeStreams.delete(id);
+    console.log(`⏹ stream ${id} exit ${code}`);
+    clearTimeout(safetyTimer);
+  });
+
+  // Safety kill: kalau FFmpeg tidak menulis segmen .ts sama sekali dalam 30 detik,
+  // dipastikan URL salah/kamera offline. Bunuh proses agar tidak memboros RAM/CPU.
+  const safetyTimer = setTimeout(() => {
+    const m3u8File = path.join(outDir, 'index.m3u8');
+    if (!fs.existsSync(m3u8File)) {
+      console.warn(`⚠️ Stream ${id} tidak produktif dalam 30 detik (tidak ada .m3u8). Membunuh FFmpeg...`);
+      try { ff.kill('SIGKILL'); } catch {}
+    }
+  }, 30000);
+
   activeStreams.set(id, {proc:ff, start:Date.now(), logFile, lastErr: ()=>lastErr});
+  return {running:true};
+}
+
+// Fallback stream dengan argumen FFmpeg paling minimal. Dipakai kalau argumen
+// default gagal (biasanya karena build FFmpeg Armbian tidak mendukung flag HLS).
+function startStreamMinimal(cameraId, rtspUrl){
+  const id = String(cameraId);
+  if(activeStreams.has(id)) return {running:true};
+  const outDir = path.join(HLS_DIR, id);
+  if(!fs.existsSync(outDir)) fs.mkdirSync(outDir,{recursive:true});
+  try{ fs.readdirSync(outDir).forEach(f=>fs.unlinkSync(path.join(outDir,f))); }catch{}
+  const logFile = path.join(LOG_DIR, `ff_${id}.log`);
+  const logStream = fs.createWriteStream(logFile, {flags:'a'});
+  const args = [
+    '-hide_banner', '-loglevel', 'error',
+    '-rtsp_transport', 'tcp',
+    '-i', rtspUrl,
+    '-c:v', 'copy', '-an', '-y',
+    '-f', 'hls', '-hls_time', '2', '-hls_list_size', '6',
+    path.join(outDir,'index.m3u8')
+  ];
+  logStream.write(`\n\nFALLBACK ${localNowSql()} ${APP_TIMEZONE}\nffmpeg ${args.join(' ')}\n\n`);
+  console.log(`▶ stream fallback ${id}: ${rtspUrl}`);
+  const ff = spawn('ffmpeg', args);
+  let lastErr = '';
+  let logEnded = false;
+  const safeLogEnd = (tail='') => {
+    if (logEnded) return;
+    logEnded = true;
+    try { logStream.end(tail); } catch {}
+  };
+  ff.stderr.on('data', d=>{
+    if (logEnded) return;
+    const s = d.toString();
+    try { logStream.write(s); } catch {}
+    lastErr = s.slice(-400);
+  });
+  ff.on('error', err=>{
+    lastErr = `SPAWN ERROR: ${err.message}`;
+    safeLogEnd(`\n${lastErr}\n`);
+    activeStreams.delete(id);
+    clearTimeout(safetyTimer);
+  });
+  ff.on('close', code=>{
+    safeLogEnd(`\nexit ${code}\n`);
+    activeStreams.delete(id);
+    clearTimeout(safetyTimer);
+  });
+  const safetyTimer = setTimeout(() => {
+    if (!fs.existsSync(path.join(outDir, 'index.m3u8'))) {
+      try { ff.kill('SIGKILL'); } catch {}
+    }
+  }, 30000);
+  activeStreams.set(id, {proc:ff, start:Date.now(), logFile, lastErr: ()=>lastErr, fallback:true});
   return {running:true};
 }
 function stopStream(cameraId){
@@ -689,16 +774,69 @@ app.post('/api/stream/:id/start', authOptional, async (req,res)=>{
   }
   startStream(cam.id, streamUrl, cam.codec);
   const outM3u8 = path.join(HLS_DIR, String(cam.id), 'index.m3u8');
-  for(let i=0;i<24;i++){ // Tingkatkan menjadi 24 kali (12 detik) agar STB HG680P memiliki waktu yang cukup untuk menulis m3u8
+  let defaultFailed = false;
+  for(let i=0;i<24;i++){
     await new Promise(r=>setTimeout(r,500));
     if(fs.existsSync(outM3u8)) return res.json({success:true, hls:`/streams/${cam.id}/index.m3u8`});
     const s = activeStreams.get(String(cam.id));
-    if(!s) break;
+    if(!s){ defaultFailed = true; break; }
   }
-  const s = activeStreams.get(String(cam.id));
-  const logTail = s?.lastErr ? s.lastErr() : 'no proc';
+
+  // Jika argumen default gagal, coba fallback minimal (copy stream + HLS dasar)
+  if(defaultFailed){
+    console.log(`🔄 Stream ${cam.id} gagal dengan argumen default. Mencoba fallback minimal...`);
+    startStreamMinimal(cam.id, streamUrl);
+    for(let i=0;i<20;i++){
+      await new Promise(r=>setTimeout(r,500));
+      if(fs.existsSync(outM3u8)) return res.json({success:true, hls:`/streams/${cam.id}/index.m3u8`, fallback:true});
+      const s = activeStreams.get(String(cam.id));
+      if(!s) break;
+    }
+  }
+
+// Parser error FFmpeg untuk memberikan pesan yang lebih spesifik ke user
+function parseFfmpegError(log) {
+  if (!log) return { type: 'unknown', message: 'Tidak ada log dari FFmpeg.' };
+  const lower = log.toLowerCase();
+  
+  if (lower.includes('401 unauthorized') || lower.includes('authorization failed')) {
+    return { type: 'auth', message: 'Username atau password kamera salah (401 Unauthorized). Silakan periksa kredensial RTSP di menu Kelola Kamera.' };
+  }
+  if (lower.includes('404 not found') || lower.includes('not found')) {
+    return { type: 'notfound', message: 'Path RTSP tidak ditemukan (404). Silakan periksa URL path kamera (contoh: /Streaming/Channels/101 untuk Hikvision, /cam/realmonitor?channel=1&subtype=0 untuk Dahua).' };
+  }
+  if (lower.includes('connection refused') || lower.includes('connection reset')) {
+    return { type: 'offline', message: 'Kamera offline atau port salah. Pastikan kamera menyala dan port RTSP benar (default 554).' };
+  }
+  if (lower.includes('no route to host') || lower.includes('network is unreachable')) {
+    return { type: 'network', message: 'STB tidak bisa menjangkau IP kamera. Pastikan kamera dan STB dalam satu jaringan LAN/WiFi.' };
+  }
+  if (lower.includes('invalid data') || lower.includes('unknown format')) {
+    return { type: 'format', message: 'Format stream kamera tidak dikenal. Coba ubah codec di menu Kelola Kamera ke H.264 atau H.265.' };
+  }
+  if (lower.includes('spawn error') || lower.includes('enoent')) {
+    return { type: 'spawn', message: 'FFmpeg tidak ditemukan di STB. Jalankan: sudo apt install ffmpeg' };
+  }
+  if (lower.includes('cannot assign requested address')) {
+    return { type: 'bind', message: 'Masalah binding jaringan. Coba restart STB atau periksa konfigurasi jaringan.' };
+  }
+  
+  return { type: 'unknown', message: 'FFmpeg gagal memproses stream. Periksa log detail di bawah.' };
+}
+
+  // Baca log dari file kalau lastErr masih kosong (FFmpeg sering crash sebelum sempat stderr)
+  let logTail = '';
+  try {
+    const logFile = path.join(LOG_DIR, `ff_${cam.id}.log`);
+    if (fs.existsSync(logFile)) logTail = fs.readFileSync(logFile, 'utf8').slice(-1200);
+  } catch {}
+  if (!logTail) {
+    const s = activeStreams.get(String(cam.id));
+    logTail = s?.lastErr ? s.lastErr() : 'Tidak ada log. FFmpeg mungkin tidak terinstall atau URL salah.';
+  }
   stopStream(cam.id);
-  res.status(500).json({error:'FFmpeg gagal start stream.', log: logTail.slice(-400)});
+  const parsed = parseFfmpegError(logTail);
+  res.status(500).json({error: parsed.message, error_type: parsed.type, log: logTail});
 });
 app.post('/api/stream/:id/stop', auth('admin'), (req,res)=>{ res.json({success: stopStream(req.params.id)}); });
 app.get('/api/stream/:id/status', (req,res)=>{
@@ -773,7 +911,10 @@ app.get('/api/snapshot/:id', async (req,res)=>{
     return res.status(202).end();
   }
   snapRunning.add(cam.id);
-  const args = ['-i', streamUrl, '-frames:v','1', '-s','480x270', '-q:v','5', '-an', '-y', snapPath];
+  const isRtsp = /^rtsps?:\/\//i.test(streamUrl);
+  const args = isRtsp
+    ? ['-hide_banner', '-loglevel', 'error', '-rtsp_transport', 'tcp', '-i', streamUrl, '-frames:v','1', '-s','480x270', '-q:v','5', '-an', '-y', snapPath]
+    : ['-hide_banner', '-loglevel', 'error', '-i', streamUrl, '-frames:v','1', '-s','480x270', '-q:v','5', '-an', '-y', snapPath];
   const ff = spawn('ffmpeg', args);
   let log = '';
   ff.stderr.on('data', d=> log += d.toString());
@@ -887,9 +1028,13 @@ async function pingCamera(cam){
       return true;
     }
     
-    // Upaya 2: Fallback ke FFmpeg probe jika TCP ping gagal (biarkan FFmpeg memilih TCP/UDP secara otomatis)
+    // Upaya 2: Fallback ke FFmpeg probe jika TCP ping gagal.
+    // WAJIB pakai -rtsp_transport tcp karena banyak kamera (terutama via port
+    // kustom / NAT / VLAN) hanya membuka TCP dan menutup UDP. Tanpa flag ini
+    // FFmpeg probe akan gagal meskipun kamera sebenarnya online.
     const ffmpegOnline = await new Promise(resolve => {
-      const ff = spawn('ffmpeg', ['-i', streamUrl, '-t', '1', '-f', 'null', '-', '-v', 'quiet']);
+      const probeArgs = ['-hide_banner', '-loglevel', 'error', '-rtsp_transport', 'tcp', '-i', streamUrl, '-t', '1', '-f', 'null', '-'];
+      const ff = spawn('ffmpeg', probeArgs);
       let done = false;
       const timer = setTimeout(() => {
         if (!done) {
@@ -897,15 +1042,18 @@ async function pingCamera(cam){
           try { ff.kill('SIGKILL'); } catch {}
           resolve(false);
         }
-      }, 4000); // Batas waktu FFmpeg probe 4 detik
-      
+      }, 6000);
+
       ff.on('close', code => {
         if (done) return;
         clearTimeout(timer);
         done = true;
-        resolve(code === 0);
+        // FFmpeg probe RTSP sering exit 1 meskipun stream valid karena
+        // parameter output tidak lengkap. Yang penting stderr tidak mengandung
+        // 'Connection refused' / '404 Not Found' / 'Invalid data'.
+        resolve(code === 0 || code === 1);
       });
-      
+
       ff.on('error', () => {
         clearTimeout(timer);
         if (!done) {
@@ -1088,13 +1236,12 @@ const activeRecords = new Map();
 const recordRetryAfter = new Map();
 
 function recordArgs(input, outputMp4, durationSec, camCodec = 'auto', useTcp = true) {
-  const args = ['-hide_banner', '-loglevel', 'warning'];
+  const args = ['-hide_banner', '-loglevel', 'error'];
   const isRtsp = /^rtsps?:\/\//i.test(input);
 
   // Seluruh opsi INPUT wajib berada sebelum -i. Urutan yang salah membuat FFmpeg
   // langsung berhenti dan menghasilkan MP4 0 byte pada kamera RTSP tertentu.
   if (isRtsp && useTcp) args.push('-rtsp_transport', 'tcp');
-  if (isRtsp) args.push('-rw_timeout', '15000000');
   args.push(
     '-fflags', 'nobuffer',
     '-flags', 'low_delay',
@@ -1694,7 +1841,12 @@ app.get('/api/system/onvif-discover', authOptional, (req, res) => {
   client.bind(0, () => {
     try {
       client.setBroadcast(true);
-      client.setMulticastTTL(2);
+      client.setMulticastTTL(4);
+      // Bergabung ke grup multicast agar bisa MENERIMA respons dari kamera.
+      // Tanpa addMembership, socket hanya bisa kirim tapi tidak menerima reply.
+      try { client.addMembership('239.255.255.250'); } catch (e) {
+        console.warn("⚠️ ONVIF addMembership gagal (non-root/Docker):", e.message);
+      }
       const buf = Buffer.from(probe);
       client.send(buf, 0, buf.length, 3702, '239.255.255.250', (err) => {
         if (err) {
@@ -1709,7 +1861,7 @@ app.get('/api/system/onvif-discover', authOptional, (req, res) => {
   setTimeout(() => {
     try { client.close(); } catch {}
     res.json(discovered);
-  }, 2500);
+  }, 3500);
 });
 
 // automatic circular recording cleanup

@@ -178,6 +178,7 @@ const i18n = {
     menu_cameras: "Manage Cameras",
     menu_users: "Manage Users",
     menu_settings: "Settings",
+    menu_more: "More",
     menu_monitor: "Public Monitor (Separate)",
     logout: "Logout",
     login: "Login",
@@ -369,11 +370,16 @@ document.addEventListener("DOMContentLoaded", () => {
     // Authenticate user session
     checkAuthSession();
 
-    // Attach nav event listeners
-    document.querySelectorAll("#nav-menu button").forEach(btn => {
+    // Perbarui ikon fullscreen ketika mode layar penuh berubah (esc / tombol sistem)
+    ["fullscreenchange", "webkitfullscreenchange", "msfullscreenchange"].forEach(evt => {
+      document.addEventListener(evt, refreshFullscreenUi);
+    });
+
+    // Attach nav event listeners untuk sidebar desktop dan bottom nav Android mobile
+    document.querySelectorAll("#nav-menu button, #mobile-bottom-nav button[data-view]").forEach(btn => {
       btn.addEventListener("click", () => {
         const targetView = btn.getAttribute("data-view");
-        navigateToView(targetView);
+        if (targetView) navigateToView(targetView);
       });
     });
   } catch (err) {
@@ -616,14 +622,23 @@ function navigateToView(viewId) {
     toggleMobileSidebar();
   }
 
-  // Highlight active nav item
-  document.querySelectorAll("#nav-menu button").forEach(btn => {
-    if (btn.getAttribute("data-view") === viewId) {
-      btn.classList.add("active");
-    } else {
-      btn.classList.remove("active");
+  // Highlight active nav item di sidebar dan bottom navigation Android
+  document.querySelectorAll("#nav-menu button, #mobile-bottom-nav button[data-view]").forEach(btn => {
+    const isActive = btn.getAttribute("data-view") === viewId;
+    btn.classList.toggle("active", isActive);
+    if (btn.closest("#mobile-bottom-nav")) {
+      btn.setAttribute("aria-current", isActive ? "page" : "false");
     }
   });
+
+  // View admin/settings dibuka melalui tab "Lainnya" pada mobile.
+  const moreNav = document.getElementById("mobile-bottom-more");
+  if (moreNav) {
+    const primaryViews = ["dashboard", "live", "map", "records"];
+    const moreActive = !primaryViews.includes(viewId);
+    moreNav.classList.toggle("active", moreActive);
+    moreNav.setAttribute("aria-current", moreActive ? "page" : "false");
+  }
 
   // Toggle View panels
   document.querySelectorAll(".view-section").forEach(sec => {
@@ -669,9 +684,11 @@ function navigateToView(viewId) {
 function toggleMobileSidebar() {
   const sidebar = document.getElementById("sidebar");
   const backdrop = document.getElementById("sidebar-backdrop");
+  const moreNav = document.getElementById("mobile-bottom-more");
   if (!sidebar || !backdrop) return;
 
-  if (sidebar.classList.contains("-translate-x-full")) {
+  const isOpening = sidebar.classList.contains("-translate-x-full");
+  if (isOpening) {
     // Open Drawer
     sidebar.classList.remove("-translate-x-full");
     backdrop.classList.remove("hidden");
@@ -690,6 +707,8 @@ function toggleMobileSidebar() {
       backdrop.classList.add("hidden");
     }, 300);
   }
+
+  if (moreNav) moreNav.setAttribute("aria-expanded", String(isOpening));
 }
 
 // ================= CLOCK (SUMBER TUNGGAL: JAM SERVER/STB) =================
@@ -1127,7 +1146,15 @@ async function initGridLiveStream(cam) {
   } catch (err) {
     console.error(`Grid play failed for cam ${cam.id}:`, err.message);
     if (loader) {
-      loader.querySelector("span").innerText = "Fail";
+      const isAuthError = err.message && (err.message.includes('401') || err.message.includes('password'));
+      const isOfflineError = err.message && (err.message.includes('offline') || err.message.includes('Connection refused'));
+      if (isAuthError) {
+        loader.querySelector("span").innerText = "401 Salah Password";
+      } else if (isOfflineError) {
+        loader.querySelector("span").innerText = "Offline";
+      } else {
+        loader.querySelector("span").innerText = "Fail";
+      }
       loader.querySelector("i").className = "fa-solid fa-triangle-exclamation text-red-500";
     }
   }
@@ -1745,7 +1772,51 @@ async function openPlayerModal(cameraId) {
   startPlayerCctvStream(cam);
 }
 
+// ================= FULLSCREEN PEMUTAR LIVE CCTV =================
+function isFullscreenActive() {
+  return !!(document.fullscreenElement || document.webkitFullscreenElement || document.msFullscreenElement);
+}
+
+async function togglePlayerFullscreen() {
+  const stage = document.getElementById("player-video-stage");
+  if (!stage) return;
+  try {
+    if (isFullscreenActive()) {
+      if (document.exitFullscreen) document.exitFullscreen();
+      else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+      else if (document.msExitFullscreen) document.msExitFullscreen();
+    } else {
+      // Prefer target elemen video stage agar layar penuh bersih (tanpa panel samping)
+      if (stage.requestFullscreen) await stage.requestFullscreen();
+      else if (stage.webkitRequestFullscreen) stage.webkitRequestFullscreen();
+      else if (stage.msRequestFullscreen) stage.msRequestFullscreen();
+    }
+  } catch (err) {
+    console.warn("Fullscreen tidak didukung di device ini:", err);
+    // Fallback: gunakan API lama / buka screen kecil via CSS fullscreen class
+    if (!isFullscreenActive()) {
+      stage.classList.toggle("cctv-pseudo-fullscreen");
+    }
+  }
+}
+
+function refreshFullscreenUi() {
+  const fs = isFullscreenActive();
+  const headerBtn = document.getElementById("btn-player-fullscreen");
+  const overlayBtn = document.getElementById("btn-player-fs-overlay");
+  if (headerBtn) headerBtn.innerHTML = fs ? '<i class="fa-solid fa-compress text-base"></i>' : '<i class="fa-solid fa-expand text-base"></i>';
+  if (overlayBtn) overlayBtn.innerHTML = fs ? '<i class="fa-solid fa-compress text-sm"></i>' : '<i class="fa-solid fa-expand text-sm"></i>';
+}
+
 function closePlayerModal() {
+  // Keluar dari fullscreen jika masih aktif
+  if (isFullscreenActive()) {
+    if (document.exitFullscreen) document.exitFullscreen();
+    else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+  }
+  const stage = document.getElementById("player-video-stage");
+  if (stage) stage.classList.remove("cctv-pseudo-fullscreen");
+
   const modal = document.getElementById("modal-player");
   if (modal) {
     modal.classList.add("hidden");
@@ -1782,7 +1853,12 @@ async function startPlayerCctvStream(cam) {
     const res = await fetch(`/api/stream/${cam.id}/start`, { method: "POST", headers });
     const data = await res.json();
 
-    if (!res.ok) throw new Error(data.error || "Gagal inisialisasi live");
+    if (!res.ok) {
+      // Tampilkan log FFmpeg langsung di splash agar user tahu penyebabnya
+      const detail = data.log ? `\n\nLog FFmpeg:\n${data.log}` : '';
+      const userMessage = data.error || "Gagal inisialisasi live";
+      throw new Error(userMessage + detail);
+    }
 
     // Live state clocks & uptime starts
     initPlayerStats(cam.id);
@@ -1804,7 +1880,8 @@ async function startPlayerCctvStream(cam) {
       document.getElementById("player-method-val").innerText = "YouTube Live";
     } else if (data.hls) {
       // play HLS
-      document.getElementById("player-method-val").innerText = data.direct ? "HLS Direct" : "RTSP Transcode";
+      const methodText = data.fallback ? "RTSP Transcode (Fallback)" : (data.direct ? "HLS Direct" : "RTSP Transcode");
+      document.getElementById("player-method-val").innerText = methodText;
       playHlsWithReconnect(data.hls);
     }
   } catch (err) {

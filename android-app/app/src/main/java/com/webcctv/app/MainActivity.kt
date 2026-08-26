@@ -116,6 +116,20 @@ class MainActivity : AppCompatActivity() {
         settings.allowFileAccess = true
         settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
 
+        // ===== ANTI-STALE CACHE: pastikan UI selalu ambil versi web terbaru =====
+        // WebView biasa menyimpan HTML/CSS/JS lama sehingga update tampilan (misalnya
+        // menu navigasi bawah ala Android) tidak langsung terlihat. Mode LOAD_NO_CACHE
+        // memaksa WebView fetch ulang semua file dari server pada setiap start.
+        settings.cacheMode = WebSettings.LOAD_NO_CACHE
+        settings.useWideViewPort = true
+        settings.loadWithOverviewMode = true
+        settings.setSupportZoom(false)
+
+        // Bersihkan seluruh cache WebView sekali pada proses aplikasi berjalan.
+        try {
+            webView.clearCache(true)
+        } catch (_: Exception) {}
+
         // Pasang Client penanganan navigasi di dalam WebView saja
         webView.webViewClient = object : WebViewClient() {
             override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
